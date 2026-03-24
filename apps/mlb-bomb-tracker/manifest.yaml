@@ -2,5 +2,5 @@
 id: mlb-bomb-tracker
 name: Bomb Tracker
 summary: Track MLB player HRs
-desc: Pick an MLB player and show his current-season home run total with a bomb icon and their headshot.
+desc: Pick an MLB player and show his home run totals for spring training, regular season, and postseason with a bomb icon and their headshot.
 author: Christian Cash
