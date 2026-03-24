@@ -1,1 +1,1 @@
-# tronbyt-apps
+These are just some apps i've modified or created for my tronbyt. 

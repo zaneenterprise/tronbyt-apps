@@ -8,6 +8,7 @@ The Bomb Tracker is a Tidbyt app that tracks your favorite players home runs for
 * Shows spring training home runs if not regular season yet
 * Auto switches to regular season once it starts
 
+*** Preview ***
 
 Spring training preview :
 
