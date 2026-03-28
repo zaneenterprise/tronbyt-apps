@@ -6,14 +6,16 @@ load("time.star", "time")
 
 SEASON_URL = "https://statsapi.mlb.com/api/v1/seasons/current?sportId=1"
 PLAYERS_URL = "https://statsapi.mlb.com/api/v1/sports/1/players?season=%s&fields=people,id,fullName,currentTeam,id"
-TEAMS_URL = "https://statsapi.mlb.com/api/v1/teams?sportId=1&season=%s&fields=teams,id,name"
-STATS_URL = "https://statsapi.mlb.com/api/v1/people/%s/stats?stats=season&group=hitting&season=%s&gameType=%s"
+TEAMS_URL = "https://statsapi.mlb.com/api/v1/teams?sportId=1&season=%s&fields=teams,id,name,abbreviation,teamName,clubName"
+PLAYER_STATS_URL = "https://statsapi.mlb.com/api/v1/people/%s/stats?stats=season&group=hitting&season=%s&gameType=%s"
+TEAM_STATS_URL = "https://statsapi.mlb.com/api/v1/teams/%s/stats?stats=season&group=hitting&season=%s&gameType=%s"
 HEADSHOT_URL = "https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:silo:current.png/w_213,q_auto:best/v1/people/%s/headshot/silo/current"
+TEAM_LOGO_URL = "https://www.mlbstatic.com/team-logos/team-cap-on-dark/%s.svg"
 
 SEASON_TTL = 21600
 DIRECTORY_TTL = 21600
 STATS_TTL = 300
-HEADSHOT_TTL = 86400
+ART_TTL = 86400
 MAX_RESULTS = 10
 
 BACKGROUND = "#07131f"
@@ -23,6 +25,7 @@ MUTED = "#9eb3c7"
 COUNT = "#ffd166"
 ACCENT = "#ff6b35"
 
+POSTSEASON_ROUNDS = ["D", "L", "W"]
 BOMB_ICON = """
 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
   <circle cx="7.5" cy="10.5" r="5.5" fill="#1f242b" stroke="#4f5863" stroke-width="1"/>
@@ -33,13 +36,37 @@ BOMB_ICON = """
 """
 
 def main(config):
-    selection_raw = config.get("player", "")
+    return run_app(config)
 
+def get_schema():
+    return schema.Schema(
+        version = "1",
+        fields = [
+            subject_field(),
+        ],
+    )
+
+def subject_field():
+    return schema.Typeahead(
+        id = "player",
+        name = "Player or Team",
+        desc = "Type an MLB player or team name and pick the match to track.",
+        icon = "baseball",
+        handler = search_live_subjects,
+    )
+
+def search_live_subjects(pattern):
     season_info = get_season_info()
+    if season_info == None:
+        return []
+    return search_subjects(pattern, season_info["season"])
+
+def run_app(config):
+    selection_raw = config.get("player", "")
     if selection_raw == "":
         return render_message_state(
             title = "Select",
-            subtitle = "player",
+            subtitle = "player/team",
             note = "in settings",
         )
 
@@ -47,47 +74,31 @@ def main(config):
     if selection == None:
         return render_error_state("BAD CFG")
 
-    if season_info == None:
-        return render_error_state("API ERR")
+    runtime = get_runtime()
+    if runtime.get("error", "") != "":
+        return render_error_state(runtime["error"])
 
-    season = season_info["season"]
-    game_type = season_info["game_type"]
-    if game_type == "P":
-        stats = get_postseason_stats(selection["id"], season)
-    else:
-        stats = get_player_stats(selection["id"], season, game_type)
+    stats = get_subject_stats(selection, runtime["season"], runtime["game_type"])
     if stats == None:
         return render_error_state("API ERR")
 
-    headshot = get_headshot(selection["id"])
-    return render_player_card(
-        player_name = selection["name"],
-        season = season,
-        game_type = game_type,
+    art = get_subject_art(selection)
+    return render_subject_card(
+        subject_name = selection["name"],
+        season = runtime["season"],
+        game_type = runtime["game_type"],
         home_runs = format_home_runs(stats["homeRuns"]),
-        headshot = headshot,
+        art = art,
+        subject_kind = selection["kind"],
     )
 
-def get_schema():
-    return schema.Schema(
-        version = "1",
-        fields = [
-            schema.Typeahead(
-                id = "player",
-                name = "Player",
-                desc = "Type an MLB player name and pick the matching hitter.",
-                icon = "baseball",
-                handler = search_players,
-            ),
-        ],
-    )
-
-def search_players(pattern):
+def get_runtime():
     season_info = get_season_info()
     if season_info == None:
-        return []
-    season = season_info["season"]
+        return {"error": "API ERR"}
+    return season_info
 
+def search_subjects(pattern, season):
     normalized = (pattern or "").strip().lower()
     if normalized == "":
         return []
@@ -95,30 +106,30 @@ def search_players(pattern):
     prefix_matches = []
     contains_matches = []
 
-    for player in get_player_directory(season):
-        haystack = player["search"]
+    for subject in get_subject_directory(season):
+        haystack = subject["search"]
         if haystack.startswith(normalized):
-            prefix_matches.append(player)
+            prefix_matches.append(subject)
         elif normalized in haystack:
-            contains_matches.append(player)
+            contains_matches.append(subject)
 
     options = []
-    for player in prefix_matches:
+    for subject in prefix_matches:
         if len(options) >= MAX_RESULTS:
             break
-        options.append(player_option(player))
+        options.append(subject_option(subject))
 
-    for player in contains_matches:
+    for subject in contains_matches:
         if len(options) >= MAX_RESULTS:
             break
-        options.append(player_option(player))
+        options.append(subject_option(subject))
 
     return options
 
-def player_option(player):
+def subject_option(subject):
     return schema.Option(
-        display = player["display"],
-        value = player["id"],
+        display = subject["display"],
+        value = "%s:%s" % (subject["kind"], subject["id"]),
     )
 
 def decode_selection(selection_raw):
@@ -126,18 +137,53 @@ def decode_selection(selection_raw):
     if option == None or type(option) != "dict":
         return None
 
-    player_id = normalize_player_id(option.get("value", ""))
-    display = option.get("display", "")
-    if player_id == "":
+    subject_ref = decode_subject_ref(option.get("value", ""))
+    if subject_ref == None:
+        return None
+
+    display = str(option.get("display", "")).strip()
+    subject_name = display_name(display)
+    if subject_name == "":
+        subject_name = "MLB %s" % subject_ref["kind"].title()
+
+    return {
+        "kind": subject_ref["kind"],
+        "id": subject_ref["id"],
+        "name": subject_name,
+    }
+
+def decode_subject_ref(raw_value):
+    raw = str(raw_value).strip()
+    if raw == "":
+        return None
+
+    if ":" not in raw:
+        subject_id = normalize_numeric_id(raw)
+        if subject_id == "":
+            return None
+        return {
+            "kind": "player",
+            "id": subject_id,
+        }
+
+    parts = raw.split(":")
+    if len(parts) != 2:
+        return None
+
+    kind = parts[0].strip()
+    subject_id = normalize_numeric_id(parts[1])
+    if subject_id == "":
+        return None
+    if kind != "player" and kind != "team":
         return None
 
     return {
-        "id": player_id,
-        "name": display_name(display),
+        "kind": kind,
+        "id": subject_id,
     }
 
-def normalize_player_id(player_id):
-    raw = str(player_id).strip()
+def normalize_numeric_id(raw_id):
+    raw = str(raw_id).strip()
     if raw == "":
         return ""
 
@@ -153,17 +199,11 @@ def normalize_player_id(player_id):
     if whole == "" or fraction == "":
         return raw
 
-    for char in fraction:
-        if char != "0":
+    for idx in range(len(fraction)):
+        if fraction[idx] != "0":
             return raw
 
     return whole
-
-#this is what determines if its spring training or not. 
-#it returns the regular season start date 
-#and if its that day or later it shows regular season stats.
-#same with postseason, it determines postseason start date
-#and if it is that day or after it shows postseason stats
 
 def get_season_info():
     response = http.get(SEASON_URL, ttl_seconds = SEASON_TTL)
@@ -175,6 +215,7 @@ def get_season_info():
     seasons = payload.get("seasons", [])
     if len(seasons) == 0:
         return None
+
     season = seasons[0]
     season_id = season.get("seasonId", None)
     regular_season_start = season.get("regularSeasonStartDate", "")
@@ -183,8 +224,9 @@ def get_season_info():
         return None
 
     return {
-        "season": season_id,
+        "season": str(season_id),
         "game_type": infer_game_type(regular_season_start, post_season_start),
+        "error": "",
     }
 
 def infer_game_type(regular_season_start, post_season_start):
@@ -195,8 +237,21 @@ def infer_game_type(regular_season_start, post_season_start):
         return "P"
     return "R"
 
-def get_player_directory(season):
-    team_names = get_team_names(season)
+def get_subject_directory(season):
+    teams = get_team_directory(season)
+    team_names = {}
+    for team in teams:
+        team_names[int(team["id"])] = team["name"]
+
+    subjects = []
+    for player in get_player_directory(season, team_names):
+        subjects.append(player)
+    for team in teams:
+        subjects.append(team)
+
+    return subjects
+
+def get_player_directory(season, team_names):
     response = http.get(PLAYERS_URL % season, ttl_seconds = DIRECTORY_TTL)
     if response.status_code != 200:
         print("player directory failed: %d" % response.status_code)
@@ -220,6 +275,7 @@ def get_player_directory(season):
             display = "%s • %s" % (full_name, team_name)
 
         players.append({
+            "kind": "player",
             "id": str(player_id),
             "display": display,
             "search": ("%s %s" % (full_name, team_name)).lower(),
@@ -227,54 +283,117 @@ def get_player_directory(season):
 
     return players
 
-def get_team_names(season):
+def get_team_directory(season):
     response = http.get(TEAMS_URL % season, ttl_seconds = DIRECTORY_TTL)
     if response.status_code != 200:
         print("team lookup failed: %d" % response.status_code)
-        return {}
+        return []
 
     payload = response.json()
-    names = {}
+    teams = []
 
     for team in payload.get("teams", []):
         team_id = team.get("id", None)
-        if team_id != None:
-            names[team_id] = team.get("name", "")
+        name = team.get("name", "")
+        if team_id == None or name == "":
+            continue
 
-    return names
+        abbreviation = team.get("abbreviation", "")
+        team_name = team.get("teamName", "")
+        club_name = team.get("clubName", "")
+        search = join_search_terms([
+            name,
+            abbreviation,
+            team_name,
+            club_name,
+        ])
 
-def get_player_stats(player_id, season, game_type):
-    response = http.get(STATS_URL % (player_id, season, game_type), ttl_seconds = STATS_TTL)
+        teams.append({
+            "kind": "team",
+            "id": str(team_id),
+            "name": name,
+            "display": "%s • Team" % name,
+            "search": search,
+        })
+
+    return teams
+
+def get_subject_stats(selection, season, game_type):
+    if game_type == "P":
+        return get_postseason_stats(selection["kind"], selection["id"], season)
+    return get_subject_stats_for_game_type(selection["kind"], selection["id"], season, game_type)
+
+def get_postseason_stats(kind, subject_id, season):
+    total = get_subject_stats_for_game_type(kind, subject_id, season, "P")
+    if total == None:
+        return None
+    if total["found"]:
+        return {"homeRuns": total["homeRuns"]}
+
+    round_total = 0
+    for round_type in POSTSEASON_ROUNDS:
+        result = get_subject_stats_for_game_type(kind, subject_id, season, round_type)
+        if result == None:
+            return None
+        round_total += result["homeRuns"]
+
+    return {"homeRuns": round_total}
+
+def get_subject_stats_for_game_type(kind, subject_id, season, game_type):
+    if kind == "team":
+        return get_stats_from_url(
+            TEAM_STATS_URL % (subject_id, season, game_type),
+            "team stats",
+        )
+    return get_stats_from_url(
+        PLAYER_STATS_URL % (subject_id, season, game_type),
+        "player stats",
+    )
+
+def get_stats_from_url(url, label):
+    response = http.get(url, ttl_seconds = STATS_TTL)
     if response.status_code != 200:
-        print("stats lookup failed: %d" % response.status_code)
+        print("%s lookup failed: %d" % (label, response.status_code))
         return None
 
     payload = response.json()
     stats_groups = payload.get("stats", [])
     if len(stats_groups) == 0:
-        return {"homeRuns": 0}
+        return {
+            "homeRuns": 0,
+            "found": False,
+        }
 
     splits = stats_groups[0].get("splits", [])
     if len(splits) == 0:
-        return {"homeRuns": 0}
+        return {
+            "homeRuns": 0,
+            "found": True,
+        }
 
     stat_line = splits[0].get("stat", {})
     return {
         "homeRuns": int(stat_line.get("homeRuns", 0)),
+        "found": True,
     }
 
-def get_postseason_stats(player_id, season):
-    total = 0
-    for round_type in ["P", "D", "L", "W"]:
-        result = get_player_stats(player_id, season, round_type)
-        if result != None:
-            total += result["homeRuns"]
-    return {"homeRuns": total}
+def get_subject_art(selection):
+    if selection["kind"] == "team":
+        return get_team_logo(selection["id"])
+    return get_headshot(selection["id"])
 
 def get_headshot(player_id):
-    response = http.get(HEADSHOT_URL % player_id, ttl_seconds = HEADSHOT_TTL)
+    response = http.get(HEADSHOT_URL % player_id, ttl_seconds = ART_TTL)
     if response.status_code != 200:
         print("headshot lookup failed: %d" % response.status_code)
+        return None
+
+    return response.body()
+
+def get_team_logo(team_id):
+    response = http.get(TEAM_LOGO_URL % team_id, ttl_seconds = ART_TTL)
+    if response.status_code != 200:
+        print("team logo lookup failed: %d" % response.status_code)
         return None
 
     return response.body()
@@ -285,7 +404,7 @@ def display_name(display):
         return display.split(separator)[0]
     return display
 
-def render_player_card(player_name, season, game_type, home_runs, headshot):
+def render_subject_card(subject_name, season, game_type, home_runs, art, subject_kind):
     return render.Root(
         max_age = STATS_TTL,
         child = render.Box(
@@ -297,14 +416,14 @@ def render_player_card(player_name, season, game_type, home_runs, headshot):
                     main_align = "space_between",
                     cross_align = "start",
                     children = [
-                        render_player_name(player_name),
+                        render_subject_name(subject_name),
                         render.Row(
                             expanded = True,
                             main_align = "space_between",
                             cross_align = "end",
                             children = [
                                 render_stat_block(home_runs, season, game_type),
-                                render_headshot(headshot),
+                                render_subject_art(art, subject_kind),
                             ],
                         ),
                     ],
@@ -313,9 +432,9 @@ def render_player_card(player_name, season, game_type, home_runs, headshot):
         ),
     )
 
-def render_player_name(player_name):
+def render_subject_name(subject_name):
     return render.Text(
-        content = player_name,
+        content = subject_name,
         font = "tom-thumb",
         color = TEXT,
     )
@@ -360,24 +479,36 @@ def stat_label(season, game_type):
 def format_home_runs(home_runs):
     return "%d" % int(home_runs)
 
-def render_headshot(headshot):
+def render_subject_art(art, subject_kind):
+    fallback = "MLB"
+    if subject_kind == "team":
+        fallback = "TEAM"
+
     child = render.Column(
+        expanded = True,
         main_align = "center",
         cross_align = "center",
         children = [
             render.Text(
-                content = "MLB",
+                content = fallback,
                 font = "CG-pixel-3x5-mono",
                 color = MUTED,
             ),
         ],
     )
 
-    if headshot != None:
-        child = render.Image(
-            src = headshot,
-            width = 20,
-            height = 20,
+    if art != None:
+        child = render.Column(
+            expanded = True,
+            main_align = "center",
+            cross_align = "center",
+            children = [
+                render.Image(
+                    src = art,
+                    width = 20,
+                    height = 20,
+                ),
+            ],
         )
 
     return render.Box(
@@ -436,3 +567,11 @@ def render_error_state(message):
             ),
         ),
     )
+
+def join_search_terms(parts):
+    values = []
+    for part in parts:
+        text = str(part).strip()
+        if text != "":
+            values.append(text)
+    return " ".join(values).lower()
