@@ -103,28 +103,48 @@ def search_subjects(pattern, season):
     if normalized == "":
         return []
 
+    exact_matches = []
     prefix_matches = []
     contains_matches = []
 
     for subject in get_subject_directory(season):
-        haystack = subject["search"]
-        if haystack.startswith(normalized):
+        match_type = classify_subject_match(subject, normalized)
+        if match_type == "exact":
+            exact_matches.append(subject)
+        elif match_type == "prefix":
             prefix_matches.append(subject)
-        elif normalized in haystack:
+        elif match_type == "contains":
             contains_matches.append(subject)
 
     options = []
-    for subject in prefix_matches:
-        if len(options) >= MAX_RESULTS:
-            break
-        options.append(subject_option(subject))
-
-    for subject in contains_matches:
-        if len(options) >= MAX_RESULTS:
-            break
-        options.append(subject_option(subject))
+    append_subject_options(options, exact_matches)
+    append_subject_options(options, prefix_matches)
+    append_subject_options(options, contains_matches)
 
     return options
+
+def classify_subject_match(subject, normalized):
+    for term in subject["terms"]:
+        if term == normalized:
+            return "exact"
+
+    for term in subject["terms"]:
+        if term.startswith(normalized):
+            return "prefix"
+
+    haystack = subject["search"]
+    if normalized in haystack:
+        return "contains"
+
+    return ""
+
+def append_subject_options(options, subjects):
+    for kind in ["team", "player"]:
+        for subject in subjects:
+            if len(options) >= MAX_RESULTS:
+                return
+            if subject["kind"] == kind:
+                options.append(subject_option(subject))
 
 def subject_option(subject):
     return schema.Option(
@@ -241,7 +261,7 @@ def get_subject_directory(season):
     teams = get_team_directory(season)
     team_names = {}
     for team in teams:
-        team_names[int(team["id"])] = team["name"]
+        team_names[team["id"]] = team["name"]
 
     subjects = []
     for player in get_player_directory(season, team_names):
@@ -262,13 +282,15 @@ def get_player_directory(season, team_names):
     players = []
 
     for person in people:
-        player_id = person.get("id", None)
+        player_id = normalize_numeric_id(person.get("id", None))
         full_name = person.get("fullName", "")
-        if player_id == None or full_name == "":
+        if player_id == "" or full_name == "":
             continue
 
         current_team = person.get("currentTeam", {})
-        team_id = current_team.get("id", None) if type(current_team) == "dict" else None
+        team_id = ""
+        if type(current_team) == "dict":
+            team_id = normalize_numeric_id(current_team.get("id", None))
         team_name = team_names.get(team_id, "")
         display = full_name
         if team_name != "":
@@ -276,8 +298,9 @@ def get_player_directory(season, team_names):
 
         players.append({
             "kind": "player",
-            "id": str(player_id),
+            "id": player_id,
             "display": display,
+            "terms": build_search_terms([full_name, team_name]),
             "search": ("%s %s" % (full_name, team_name)).lower(),
         })
 
@@ -293,9 +316,9 @@ def get_team_directory(season):
     teams = []
 
     for team in payload.get("teams", []):
-        team_id = team.get("id", None)
+        team_id = normalize_numeric_id(team.get("id", None))
         name = team.get("name", "")
-        if team_id == None or name == "":
+        if team_id == "" or name == "":
             continue
 
         abbreviation = team.get("abbreviation", "")
@@ -310,9 +333,10 @@ def get_team_directory(season):
 
         teams.append({
             "kind": "team",
-            "id": str(team_id),
+            "id": team_id,
             "name": name,
             "display": "%s • Team" % name,
+            "terms": build_search_terms([name, abbreviation, team_name, club_name]),
             "search": search,
         })
 
@@ -575,3 +599,11 @@ def join_search_terms(parts):
         if text != "":
             values.append(text)
     return " ".join(values).lower()
+
+def build_search_terms(parts):
+    terms = []
+    for part in parts:
+        text = str(part).strip().lower()
+        if text != "":
+            terms.append(text)
+    return terms
