@@ -291,7 +291,7 @@ def route_parts_are_useful(route_parts):
 def get_origin_destination(callsign, lat, lng):
     route = get_route(callsign, lat, lng)
     if route == None:
-        return ["Unknown", "Unknown"]
+        return None
 
     route_parts = split_route_codes(route.get("_airport_codes_iata"))
     if route_parts_are_useful(route_parts):
@@ -309,9 +309,9 @@ def get_origin_destination(callsign, lat, lng):
         if route_parts_are_useful(route_parts):
             return route_parts
 
-    return ["Unknown", "Unknown"]
+    return None
 
-def get_display_flight(lat, lng, distance_miles):
+def get_display_flight(lat, lng, distance_miles, show_unknown):
     aircraft = sort_aircraft_by_distance(get_aircraft_in_radius(lat, lng, distance_miles))
     if not aircraft:
         return None
@@ -331,11 +331,14 @@ def get_display_flight(lat, lng, distance_miles):
                     "destination": origin_destination[1],
                 }
 
-    return {
-        "flight": fallback_flight,
-        "origin": "Unknown",
-        "destination": "Unknown",
-    }
+    if show_unknown:
+        return {
+            "flight": fallback_flight,
+            "origin": "Unknown",
+            "destination": "Unknown",
+        }
+
+    return None
 
 def format_altitude_feet(flight):
     altitude = flight.get("alt_baro")
@@ -452,6 +455,7 @@ def build_extended_text(flight, orig_lat, orig_lng):
 def main(config):
     hide_when_nothing_to_display = config.bool("hide", True)
     extend = config.bool("extend", True)
+    show_unknown = config.bool("show_unknown", False)
 
     location = json.decode(config.get("location", DEFAULT_LOCATION))
     orig_lat = location["lat"]
@@ -459,7 +463,7 @@ def main(config):
 
     lat = reduce_accuracy(orig_lat)
     lng = reduce_accuracy(orig_lng)
-    display_flight = get_display_flight(lat, lng, config.get("distance", DEFAULT_DISTANCE))
+    display_flight = get_display_flight(lat, lng, config.get("distance", DEFAULT_DISTANCE), show_unknown)
 
     if display_flight:
         flight = display_flight["flight"]
@@ -549,6 +553,13 @@ def get_schema():
                 id = "extend",
                 name = "Extend",
                 desc = "Show extended data for nearest flight?",
+                icon = "gear",
+                default = False,
+            ),
+            schema.Toggle(
+                id = "show_unknown",
+                name = "Show Unknown",
+                desc = "Allow Unknown/Unknown flights when route data is missing?",
                 icon = "gear",
                 default = False,
             ),
