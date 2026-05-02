@@ -3,7 +3,7 @@ id: flights-nearby
 name: Flights Nearby
 summary: Flights nearby
 desc: Find the closest flight to your location with live ADS-B data from adsb.lol.
-author: eddichen
+author: eddichen / modified to use free api by ChristianCash
 fileName: flights_nearby.star
 packageName: flightsnearby
 recommendedInterval: 5
