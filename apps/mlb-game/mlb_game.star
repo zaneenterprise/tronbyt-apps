@@ -762,22 +762,14 @@ def count_tile(inning, top_half, balls, strikes, outs, status_text, game_label):
         status_child = render.Text(status_text, font = "6x10-rounded")
         if len(status_text) > 5:
             status_child = render.Text(status_text, font = "5x8")
-        if len(status_text) >= 3 and (
-            status_text[len(status_text) - 3:] == " ET" or
-            status_text[len(status_text) - 3:] == " CT" or
-            status_text[len(status_text) - 3:] == " MT" or
-            status_text[len(status_text) - 3:] == " PT" or
-            status_text[len(status_text) - 3:] == " HT" or
-            (len(status_text) >= 4 and status_text[len(status_text) - 4:] == " AKT")
-        ):
-            suf_len = 2
-            if len(status_text) >= 4 and status_text[len(status_text) - 4:] == " AKT":
-                suf_len = 3
-            status_child = render.Row(
+        status_parts = status_text.split(" ")
+        if len(status_parts) == 2 and ":" in status_parts[0]:
+            # Stack the time and zone so both fit the narrow status panel.
+            status_child = render.Column(
                 children = [
-                    render.Text(status_text[:len(status_text) - 1 - suf_len], font = "5x8"),
-                    spacer_w(1),
-                    render.Text(status_text[len(status_text) - suf_len:], font = "CG-pixel-3x5-mono"),
+                    render.Text(status_parts[0], font = "5x8"),
+                    spacer_h(1),
+                    render.Text(status_parts[1], font = "CG-pixel-3x5-mono"),
                 ],
                 main_align = "center",
                 cross_align = "center",

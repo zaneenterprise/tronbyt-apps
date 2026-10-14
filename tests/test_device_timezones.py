@@ -8,6 +8,7 @@ environment value, while time.tz(), parsing, and timezone conversion remain
 Pixlet's implementations. All HTTP requests must match in-memory fixtures;
 these tests do not access the network or require accounts/personal settings.
 Optional TIMEZONE_TEST_RESULTS names a JSON evidence file to write.
+Optional TIMEZONE_TEST_ARTIFACT_DIR saves complete game-card WebP fixtures.
 """
 
 from datetime import datetime, timedelta
@@ -88,7 +89,7 @@ class DeviceTimezoneTests(unittest.TestCase):
             Path(destination).write_text(json.dumps(evidence, indent=2) + "\n")
 
     def fixture(self, source_path, *, timezone=PHOENIX, now="2026-07-01T18:00:00Z",
-                responses=None, config=None, body=None, edit=None, name=None):
+                responses=None, config=None, body=None, edit=None, name=None, artifact_name=None):
         responses = responses or {}
         original = source_path.read_text()
         source = original
@@ -166,24 +167,66 @@ time = struct(now = fixture_now, tz = real_time.tz,
             self.assertEqual(result.returncode, 0, log)
             self.assertTrue(output.exists(), log)
             self.assertEqual(requests, list(responses), "missing or unexpected fixture requests")
+            artifact_dir = os.environ.get("TIMEZONE_TEST_ARTIFACT_DIR")
+            if artifact_name and artifact_dir:
+                destination = Path(artifact_dir)
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(output, destination / (artifact_name + ".webp"))
+                RESULTS[-1]["artifact"] = artifact_name + ".webp"
 
-    def game_fixture(self, timezone, now, date, start=None, expected=None):
+    def game_fixture(self, timezone, now, date, start=None, expected=None,
+                     full_render=False, status="Preview", artifact_name=None):
         games = []
-        if start:
+        if start is not None:
             games = [{"gameDate": start, "gameType": "R", "gamePk": 1,
-                      "status": {"abstractGameState": "Preview"},
+                      "status": {"abstractGameState": status},
                       "linescore": {"currentInning": 0},
                       "teams": {"home": {"team": {"id": 119, "abbreviation": "LAD"}},
                                 "away": {"team": {"id": 111, "abbreviation": "BOS"}}}}]
+        responses = {
+            ESPN + "?limit=100": (200, {"events": []}),
+            MLB + "/teams?sportId=1&activeStatus=Y": (200, {"teams": [{"id": 119}, {"id": 111}]}),
+            MLB + "/schedule?sportId=1&teamId=119&hydrate=linescore&date=" + date:
+                (200, {"dates": [{"games": games}]}),
+        }
+        if full_render:
+            responses.update({"https://a.espncdn.com/i/teamlogos/mlb/500-dark/" + team + ".png":
+                              (200, "FIXTURE_PNG") for team in ["bos", "lad"]})
+
+        def instrument(source):
+            signature = "def count_tile(inning, top_half, balls, strikes, outs, status_text, game_label):\n"
+            self.assertEqual(source.count(signature), 1)
+            check = ("    if status_text != " + json.dumps(expected) + ":\n"
+                     "        fail(\"incorrect status reaching complete game card\", status_text)\n"
+                     "    print(\"TEST_VALUE:\" + status_text)\n")
+            return source.replace(signature, signature + check, 1)
+
         self.fixture(GAME, timezone=timezone, now=now,
-                     config={**stale_settings(timezone), "team": "LAD"}, responses={
-                         ESPN + "?limit=100": (200, {"events": []}),
-                         MLB + "/teams?sportId=1&activeStatus=Y": (200, {"teams": [{"id": 119}, {"id": 111}]}),
-                         MLB + "/schedule?sportId=1&teamId=119&hydrate=linescore&date=" + date:
-                             (200, {"dates": [{"games": games}]}),
-                     }, body=assert_value('get_game_data(config)["start_text"]' if start else
-                                          'get_game_data(config)["fetch_ok"]', expected if start else True),
-                     name=f"game_{timezone}_{now}_{start or 'schedule'}")
+                     config={**stale_settings(timezone), "team": "LAD"}, responses=responses,
+                     body=None if full_render else assert_value(
+                         'get_game_data(config)["start_text"]' if start is not None else
+                         'get_game_data(config)["fetch_ok"]', expected if start is not None else True),
+                     edit=instrument if full_render else None, artifact_name=artifact_name,
+                     name=artifact_name or f"game_{timezone}_{now}_{start or 'schedule'}")
+
+    def test_complete_game_cards_render_timezone_labels_and_wide_hours(self):
+        # These call the real main(), including team panels, count_tile and
+        # layout. Optional saved images support checking text clipping.
+        cases = [
+            ("game-phoenix-summer", PHOENIX, "2026-07-01T18:00:00Z", "2026-07-01", "2026-07-01T23:05:00Z", "4:05 MST", "Preview"),
+            ("game-phoenix-winter", PHOENIX, "2026-01-01T18:00:00Z", "2026-01-01", "2026-01-01T23:05:00Z", "4:05 MST", "Preview"),
+            ("game-newyork-summer", EASTERN, "2026-07-01T18:00:00Z", "2026-07-01", "2026-07-01T23:05:00Z", "7:05 EDT", "Preview"),
+            ("game-newyork-winter", EASTERN, "2026-01-01T18:00:00Z", "2026-01-01", "2026-01-01T23:05:00Z", "6:05 EST", "Preview"),
+            ("game-phoenix-1105", PHOENIX, "2026-07-01T17:00:00Z", "2026-07-01", "2026-07-01T18:05:00Z", "11:05 MST", "Preview"),
+            ("game-phoenix-1230", PHOENIX, "2026-07-01T17:00:00Z", "2026-07-01", "2026-07-01T19:30:00Z", "12:30 MST", "Preview"),
+            ("game-numeric-offset", "Asia/Colombo", "2026-07-01T00:00:00Z", "2026-07-01", "2026-07-01T05:35:00Z", "11:05 +0530", "Preview"),
+            ("game-tbd", PHOENIX, "2026-07-01T18:00:00Z", "2026-07-01", "", "TBD", "Preview"),
+            ("game-final", PHOENIX, "2026-07-01T18:00:00Z", "2026-07-01", "2026-07-01T12:05:00Z", "Final", "Final"),
+        ]
+        for name, zone, now, date, start, expected, status in cases:
+            with self.subTest(case=name):
+                self.game_fixture(zone, now, date, start, expected, full_render=True,
+                                  status=status, artifact_name=name)
 
     def test_game_summer_winter_uses_device_zone_and_ignores_saved_timezone(self):
         for zone, summer, winter in [(PHOENIX, "4:05 MST", "4:05 MST"),
